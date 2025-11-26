@@ -1,0 +1,440 @@
+import { Modal } from "@sabre/spark-react-core";
+import React, { useState } from "react";
+import { useEffect } from "react";
+import SearchTool from "../SearchTool";
+import ViewMore from "@sabre/spark-react-core/view-more";
+import { ViewMoreStatus } from "@sabre/spark-react-core/types";
+import axios from "axios";
+import constants from "../../common/serverConstants";
+
+// Define the number of items per page
+const ITEMS_PER_PAGE = 10;
+
+/**
+ * Helper function to strip HTML tags from a string.
+ * This is a common client-side approach for sanitizing or cleaning display text.
+ * @param {string} htmlString - The string potentially containing HTML tags.
+ * @returns {string} The clean string with HTML tags removed.
+ */
+const stripHtmlTags = (htmlString) => {
+  if (typeof htmlString !== 'string') return htmlString;
+  // Use a temporary div element to parse the HTML and get the inner text
+  const tempDiv = document.createElement("div");
+  tempDiv.innerHTML = htmlString;
+  return tempDiv.textContent || tempDiv.innerText || "";
+};
+
+export default function AnalysisDashboard() {
+  const [searchByUserEmail, setSearchByUserEmail] = useState("");
+  const [searchByStartDate, setStartDate] = useState("");
+  const [searchByEndDate, setEndDate] = useState("");
+  const [loadStatus, setloadStatus] = useState("None");
+  // Store ALL fetched and formatted data
+  const [allDataList, setAllDataList] = useState([]);
+  // Store data for the CURRENT PAGE/VIEW
+  const [dataList, setDataList] = useState([]);
+  const [isPopupOpen, setIsPopupOpen] = useState(false);
+  const [currentData, setCurrentData] = useState(null);
+  const [editedData, setEditedData] = useState(null);
+  // Pagination State
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+
+  const expressAppUrl = new URL(constants.api_url);
+  const idToken = sessionStorage.getItem("idToken");
+  const userId = sessionStorage.getItem("userEmail");
+
+  /**
+   * Function to update the data list based on current filters and page
+   */
+  const updateDataList = React.useCallback(
+    (dataToFilter) => {
+      // 1. Apply Filters
+      const filteredData = dataToFilter
+        .filter((data) =>
+          data.userId
+            .toLowerCase()
+            .includes(searchByUserEmail.toLowerCase()),
+        )
+        .filter(
+          (data) =>
+            searchByStartDate === "" ||
+            new Date(data.recordDate) >= new Date(searchByStartDate),
+        )
+        .filter(
+          (data) =>
+            searchByEndDate === "" ||
+            new Date(data.recordDate) <= new Date(searchByEndDate),
+        );
+
+      // 2. Update Pagination based on filtered data
+      const newTotalPages = Math.ceil(filteredData.length / ITEMS_PER_PAGE);
+      setTotalPages(newTotalPages === 0 ? 1 : newTotalPages);
+      
+      const pageToSlice = currentPage > newTotalPages ? 1 : currentPage;
+      
+      // 3. Slice data for the current page
+      const startIndex = (pageToSlice - 1) * ITEMS_PER_PAGE;
+      const endIndex = startIndex + ITEMS_PER_PAGE;
+      const paginatedData = filteredData.slice(startIndex, endIndex);
+
+      // 4. Update the visible data list
+      setDataList(paginatedData);
+    },
+    [
+      searchByUserEmail,
+      searchByStartDate,
+      searchByEndDate,
+      currentPage,
+    ],
+  );
+
+  // Initial Data Fetch Effect (runs once on mount)
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setloadStatus(ViewMoreStatus.LOADING);
+        
+        console.log("user id : " + userId);
+        const loadedData = await axios.get(
+          `${expressAppUrl}loadDashboardData`,
+          {
+            params: { userId }, // Pass userId as a parameter
+          },
+        );
+        const dashboardData = loadedData.data;
+
+        const dashbboardDataList = Object.keys(dashboardData).map(
+          (key, index) => {
+            return {
+              id: index + 1,
+              userId: dashboardData[key].userId,
+              // ⭐ APPLY HTML STRIPPING HERE
+              question: stripHtmlTags(dashboardData[key].question), 
+              questionId: dashboardData[key].questionId,
+              // ⭐ APPLY HTML STRIPPING HERE
+              answer: stripHtmlTags(dashboardData[key].answer), 
+              searchType: dashboardData[key].searchType,
+              toolsExecuted: dashboardData[key].toolsExecuted,
+              expectedAnswer: stripHtmlTags(dashboardData[key].expectedAnswer), // Also clean expected answer
+              feedback: dashboardData[key].feedback,
+              accuracy: dashboardData[key].accuracy,
+              recordDate: dashboardData[key].recordDate,
+            };
+          },
+        );
+        
+        // Store ALL formatted data
+        setAllDataList(dashbboardDataList);
+        setloadStatus(ViewMoreStatus.NONE);
+
+        console.log("Data fetched: ", dashboardData);
+      } catch (error) {
+        console.error("Error fetching data: ", error);
+        setloadStatus(ViewMoreStatus.ERROR);
+      }
+    };
+    fetchData();
+  }, [expressAppUrl, userId]);
+
+  // Effect to handle filtering/pagination logic
+  useEffect(() => {
+    if (allDataList.length > 0) {
+      updateDataList(allDataList);
+    } else {
+      setDataList([]); 
+      setTotalPages(1);
+    }
+  }, [allDataList, updateDataList]);
+
+  const handleEditClick = (data) => {
+    setCurrentData(data);
+    setIsPopupOpen(true);
+  };
+
+  const handleClosePopup = () => {
+    if (editedData) {
+      const indexInAllList = allDataList.findIndex(
+        (data) => data.id === editedData.id,
+      );
+      if (indexInAllList !== -1) {
+        const updatedAllDataList = [...allDataList];
+        updatedAllDataList[indexInAllList] = editedData;
+        setAllDataList(updatedAllDataList);
+      }
+    }
+    setIsPopupOpen(false);
+    setCurrentData(null);
+    setEditedData(null);
+  };
+
+  const handleFormSubmit = async (event) => {
+    event.preventDefault();
+    // Strip HTML from user input before creating the updatedData object
+    const expectedAnswer = stripHtmlTags(event.target.expectedAnswer.value);
+    const updatedData = {
+      ...currentData,
+      expectedAnswer: expectedAnswer,
+    };
+    setEditedData(updatedData);
+
+    // Update expected answer data
+    try {
+      let data = updatedData;
+      const url = `${expressAppUrl}updateDashboardData`;
+
+      await axios.post(url, data, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+          domain: sessionStorage.getItem("domainType"),
+        },
+      });
+      handleClosePopup(); 
+    } catch (error) {
+      console.error("Error updating expected answer:", error);
+    }
+
+    // Update accuracy
+    try {
+      let data = { questionId: updatedData.questionId };
+      const url = `${expressAppUrl}updateAccuracy`;
+      let response = await axios.post(url, data, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+          domain: sessionStorage.getItem("domainType"),
+        },
+      });
+      const updatedAccuracyData = {
+        ...updatedData,
+        accuracy: response.data.accuracy,
+      };
+
+      const updatedAllDataList = allDataList.map((data) =>
+        data.id === updatedAccuracyData.id ? updatedAccuracyData : data,
+      );
+      setAllDataList(updatedAllDataList);
+    } catch (error) {
+      console.error("Error updating accuracy:", error);
+    }
+  };
+
+  // Handler for pagination buttons
+  const handlePageChange = (newPage) => {
+    if (newPage >= 1 && newPage <= totalPages) {
+      setCurrentPage(newPage);
+    }
+  };
+
+  // --- RENDERING ---
+  return (
+    <div className="infoPanel spark-panel spark-panel--card col-lg-12 spark-mar-t-2">
+      <div
+        className="knowledgeHeader"
+        style={{ display: "flex", justifyContent: "space-between" }}
+      >
+        <p
+          className="helperHeading"
+          style={{
+            fontWeight: "bold",
+            fontSize: "2rem",
+            marginTop: "2rem",
+            marginLeft: "4rem",
+          }}
+        >
+          Accuracy History
+        </p>
+
+        <div
+          className="filters"
+          style={{ position: "relative", display: "flex", right: "40rem" }}
+        >
+          <label
+            className={"spark-input"}
+            style={{
+              top: "1.8rem",
+              position: "absolute",
+              right: "4rem",
+              width: "max-content",
+              fontSize: "23px",
+            }}
+          >
+            Search :{" "}
+          </label>
+          <SearchTool
+            search={searchByStartDate}
+            setSearch={setStartDate}
+            style={{
+              position: "absolute",
+              width: "20rem",
+              marginTop: "1rem",
+              marginBottom: "2rem",
+              left: "-3rem",
+            }}
+            title="Search by Start Date"
+            type="date"
+            placeholder="Start Date"
+          />
+          <SearchTool
+            search={searchByEndDate}
+            setSearch={setEndDate}
+            style={{
+              width: "20rem",
+              marginTop: "1rem",
+              marginBottom: "2rem",
+              position: "absolute",
+              left: "18.7rem",
+            }}
+            title="Search by End Date"
+            type="date"
+            placeholder="End Date"
+          />
+          <SearchTool
+            search={searchByUserEmail}
+            setSearch={setSearchByUserEmail}
+            placeholder="Type user email to search"
+            style={{
+              width: "35rem",
+              marginTop: "1rem",
+              marginBottom: "2rem",
+              display: "none",
+            }}
+            title="Search by User Email"
+            type="email"
+          />
+        </div>
+      </div>
+      
+      {/* ViewMore component for loading status */}
+      <ViewMore
+        status={loadStatus}
+        isButton={false}
+        loadingRecordsCount={ITEMS_PER_PAGE}
+        renderLazyLoadingTitle={() => `Loading Dashboard Data...`}
+      />
+
+      <div className="dashboardContainer">
+        <section className="spark-table spark-table--condensed spark-table--resizable col-xs-12">
+          <div className="spark-table__scroll">
+            <table role="grid">
+              <thead>
+                <tr>
+                  <th tabIndex="0">Question ID</th>
+                  <th tabIndex="0">Question</th>
+                  <th tabIndex="0">Answer</th>
+                  <th tabIndex="0">Search Type</th>
+                  <th tabIndex="0">Expected Answer</th>
+                  <th tabIndex="0"></th>
+                  <th tabIndex="0">Feedback</th>
+                  <th tabIndex="0">Accuracy</th>
+                  <th tabIndex="0">Record Date</th>
+                </tr>
+              </thead>
+              {/* Map over the paginated dataList */}
+              {dataList.map((data) => (
+                <tbody key={data.id}> 
+                  <tr>
+                    <td>{data.questionId}</td>
+                    <td>{data.question}</td>
+                    <td>{data.answer}</td>
+                    <td>{data.searchType}</td>
+                    <td style={{ borderRight: "none" }}>
+                      {data.expectedAnswer}
+                    </td>
+                    <td
+                      className="spark-table__actions--icons"
+                      style={{ borderLeft: "none" }}
+                    >
+                      <button
+                        className="spark-icon-pencil spark-icon spark-btn--icon spark-icon--md spark-table__edit-row"
+                        aria-label="Edit"
+                        title="Edit"
+                        onClick={() => handleEditClick(data)}
+                      ></button>
+                    </td>
+                    <td>{data.feedback}</td>
+                    <td>{data.accuracy}</td>
+                    <td>{data.recordDate}</td>
+                  </tr>
+                </tbody>
+              ))}
+            </table>
+          </div>
+        </section>
+      </div>
+
+      {/* STYLED PAGINATION CONTROLS */}
+      {dataList.length > 0 && (
+        <div 
+          className="spark-pagination spark-mar-t-2 spark-mar-b-2" 
+          style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', paddingRight: '1rem' }}
+        >
+          <span className="spark-text-weak spark-mar-r-2">
+            Viewing records **{(currentPage - 1) * ITEMS_PER_PAGE + 1}** to **{Math.min(currentPage * ITEMS_PER_PAGE, allDataList.length)}** of **{allDataList.length}**
+          </span>
+
+          <button
+            className="spark-btn spark-btn--tertiary spark-btn--icon"
+            onClick={() => handlePageChange(currentPage - 1)}
+            disabled={currentPage === 1}
+            aria-label="Previous Page"
+          >
+            <span className="spark-icon-arrow-left"></span>
+          </button>
+          
+          <span className="spark-text-bold spark-mar-lr-1">
+            {currentPage} / {totalPages}
+          </span>
+          
+          <button
+            className="spark-btn spark-btn--tertiary spark-btn--icon"
+            onClick={() => handlePageChange(currentPage + 1)}
+            disabled={currentPage === totalPages}
+            aria-label="Next Page"
+          >
+            <span className="spark-icon-arrow-right"></span>
+          </button>
+        </div>
+      )}
+
+      {/* Modal remains the same */}
+      {isPopupOpen && (
+        <Modal
+          className="spark-modal__body"
+          onClose={handleClosePopup}
+          open={isPopupOpen}
+          title="Change Expected Answer"
+        >
+          <form onSubmit={handleFormSubmit}>
+            <div>
+              <label className="spark-input" style={{ margin: "1.5rem 0" }}>
+                <textarea
+                  className="spark-input__field"
+                  id={"editExpectedAnswer" + currentData.id}
+                  name="expectedAnswer"
+                  type="text"
+                  // Note: data.expectedAnswer is already cleaned upon initial load
+                  defaultValue={currentData.expectedAnswer}
+                  style={{
+                    height: "170px",
+                    fontWeight: "400",
+                    fontSize: "20px",
+                    padding: "0.5rem 1rem",
+                    resize: "vertical",
+                    overflow: "hidden",
+                  }}
+                />
+              </label>
+              <div>
+                <button className="spark-btn spark-btn--primary" type="submit">
+                  Save
+                </button>
+              </div>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </div>
+  );
+}
